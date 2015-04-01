@@ -29,18 +29,18 @@ struct reliable_state {
   int window;       // Sending window length in packets;
   int timeout;
 
-  int window_seqno; // Sequence number of first packet.
+  int window_seqno; // Sequence number of the first packet in our window.
 
   char *p_buf;                 // Sending window buffer.
-  struct timespec window_time; // Last sent times.
+  struct timespec window_time; // Last send time of the window.
 
   int my_ackno; // Our current acknowledged packet #.
   int my_seqno; // Our current sequence number.
-  int my_eof;  // Our EOF status.
+  int my_eof;   // Our EOF status.
  
   int r_ackno; // Last received remote ackno.
   int r_seqno; // Last received remote seqno.
-  int r_eof;  // Remote EOF status.
+  int r_eof;   // Remote EOF status.
 
 };
 rel_t *rel_list;
