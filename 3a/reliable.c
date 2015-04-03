@@ -1,5 +1,4 @@
 #include <assert.h>
-#include <math.h>
 #include <poll.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -99,13 +98,7 @@ void rel_destroy (rel_t *r) {
   free(r->p_buf);
 }
 
-// This function only gets called when the process is running as a server and
-// must handle connections from multiple clients. You have to look up the rel_t
-// structure based on the address in the sockaddr_storage passed in. If this is
-// a new connection (sequence number 1), you will need to allocate a new conn_t
-// using rel_create() (Pass rel_create NULL for the conn_t, so it will know to
-// allocate a new connection).
-// TODO: DON'T NEED TO IMPLEMENT.
+// DON'T NEED TO IMPLEMENT.
 void rel_demux (const struct config_common *cc,
                 const struct sockaddr_storage *ss,
                 packet_t *pkt, size_t len) {
@@ -141,16 +134,20 @@ void rel_recvpkt (rel_t *r, packet_t *pkt, size_t n) {
     struct packet temp; // Bullshit so I can get packet header length.
     int pkt_data_len = pkt_len - (PACKET_LENGTH - sizeof(temp.data));
     // Only send the acknowledge if we have the space for packet data.
-    if (conn_bufspace(r->c) < pkt_data_len) {
-      return;
-    }
+    //if (conn_bufspace(r->c) < pkt_data_len) {
+    //  return;
+    //}
     struct ack_packet ack;
     ack.len = htons(ACK_PACKET_LENGTH);
     if (pkt_len == PACKET_LENGTH - sizeof(temp.data)) {
       // EOF packet received.
       r->r_eof = 1;
     }
-    if (pkt_seqno == r->my_ackno) {
+    // If the packet sequence number is the last packet number the remote
+    // acked, we write out and increment our ackno. If we don't have space in
+    // the output buffer, we don't store the packet and instead ack the last
+    // received packet number.
+    if (pkt_seqno == r->my_ackno && conn_bufspace(r->c) >= pkt_data_len) {
       // If the packet is next in sequence.
       r->my_ackno += 1;
       r->r_seqno = pkt_seqno;
