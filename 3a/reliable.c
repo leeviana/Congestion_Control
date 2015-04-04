@@ -25,7 +25,7 @@ struct reliable_state {
   conn_t *c; // Connection object.
 
   // Extra space.
-  int window;       // Sending window length in packets;
+  int window;  // Sending window length in packets;
   int timeout;
 
   int window_seqno; // Sequence number of the first packet in our window.
@@ -134,9 +134,9 @@ void rel_recvpkt (rel_t *r, packet_t *pkt, size_t n) {
     struct packet temp; // Bullshit so I can get packet header length.
     int pkt_data_len = pkt_len - (PACKET_LENGTH - sizeof(temp.data));
     // Only send the acknowledge if we have the space for packet data.
-    //if (conn_bufspace(r->c) < pkt_data_len) {
+    // if (conn_bufspace(r->c) < pkt_data_len) {
     //  return;
-    //}
+    // }
     struct ack_packet ack;
     ack.len = htons(ACK_PACKET_LENGTH);
     if (pkt_len == PACKET_LENGTH - sizeof(temp.data)) {
@@ -144,9 +144,7 @@ void rel_recvpkt (rel_t *r, packet_t *pkt, size_t n) {
       r->r_eof = 1;
     }
     // If the packet sequence number is the last packet number the remote
-    // acked, we write out and increment our ackno. If we don't have space in
-    // the output buffer, we don't store the packet and instead ack the last
-    // received packet number.
+    // acked, we write out and increment our ackno.
     if (pkt_seqno == r->my_ackno && conn_bufspace(r->c) >= pkt_data_len) {
       // If the packet is next in sequence.
       r->my_ackno += 1;
@@ -190,7 +188,6 @@ void rel_read (rel_t *s) {
   // If r_ackno > window_seqno, then there are acked packets at the beginning
   // of our buffer.
   // If our buffer begins with acked packets, we first move those out.
-  // fprintf(stderr, "my_seqno: %d, my_ackno: %d, r_seqno: %d, r_ackno: %d, window_seqno: %d\n", s->my_seqno, s->my_ackno, s->r_seqno, s->r_ackno, s->window_seqno);
   if (s->my_seqno > 0) {
     // Need to deal with window = 1 case apparently...
     if (s->r_ackno > s->window_seqno) {
@@ -239,18 +236,6 @@ void rel_read (rel_t *s) {
 }
 
 void rel_output (rel_t *r) {
-  // TALK TO OTHERS ABOUT THIS...
-  /*int i;
-  for (i = r->my_ackno; i <= r->r_seqno; i++) {
-    struct ack_packet ack;
-    ack.len = htons(ACK_PACKET_LENGTH);
-    // Acknowledge the last packet we received.
-    ack.ackno = htonl(i + 1);
-    ack.cksum = 0;
-    ack.cksum = cksum(&ack, ACK_PACKET_LENGTH);
-    conn_sendpkt(r->c, (packet_t *) &ack, ACK_PACKET_LENGTH);
-  }*/
-  //r->my_ackno = r->r_seqno + 1;
 }
 
 void rel_timer () {
