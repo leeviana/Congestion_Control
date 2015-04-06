@@ -1,3 +1,5 @@
+// TODO: Check EOF file handling.
+
 #include <assert.h>
 #include <errno.h>
 #include <poll.h>
@@ -32,6 +34,9 @@ struct reliable_state {
   conn_t *c;
 
   // Extra space.
+  struct timespec start_time;
+
+  int window;   // Max window size.
   int r_window; // Receiver advertised window length in packets.
   int c_window; // Congestion control window length in packets.
   int timeout;  // TODO: Do I need this?
@@ -133,6 +138,7 @@ rel_t * rel_create (conn_t *c, const struct sockaddr_storage *ss,
   rel_list = r;
 
   // Init. TODO: Check.
+  r->window = cc->window;
   r->r_window = INF;
   r->c_window = INITIAL_C_WINDOW;
   r->timeout = cc->timeout;
@@ -156,11 +162,17 @@ rel_t * rel_create (conn_t *c, const struct sockaddr_storage *ss,
 
   r->dup_ack_count = 0;
 
+  clock_gettime(CLOCK_MONOTONIC, &(r->start_time)); // Set start time.
   return r;
 }
 
 void rel_destroy (rel_t *r) {
   conn_destroy (r->c);
+
+  struct timespec t;
+  clock_gettime(CLOCK_MONOTONIC, &t);
+  printf("Transmitted file in %ld seconds.\n",
+         t.tv_sec - (r->start_time).tv_sec);
 
   // Free any other allocated memory here.
   free(r->p_buf);
@@ -277,6 +289,7 @@ void rel_read (rel_t *s) {
   // The sending window size is the minimum of our congestion window and the
   // advertised receiving window.
   int s_window = MIN(s->c_window, s->r_window);
+  s_window = MIN(s->window, s_window); // TODO: Clip window size if need to.
   resize_p_buf(s, s_window); // Resize the buffer if we need to.
   
   // Sender mode.

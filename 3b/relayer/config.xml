@@ -1,10 +1,10 @@
 <config>
 
 <!-- CPU frequency (MHz) on which this relayer is running, can get by "cat /proc/cpuinfo" -->
-<CPU_frequency>2526.793</CPU_frequency>
+<CPU_frequency>2599.838</CPU_frequency>
 
 <!-- 1: enable relayer log, 0: disable relayer log. log is time consuming, it may interrupt pkt transmit -->
-<enable_log>0</enable_log>
+<enable_log>1</enable_log>
 
 <number_of_pairs>2</number_of_pairs>
 
