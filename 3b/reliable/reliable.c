@@ -25,7 +25,7 @@
 #define INF 12345678
 
 #define INITIAL_C_WINDOW 1
-#define TIMEOUT 1 // Defined in seconds.
+#define TIMEOUT 20 // Defined in 10s of milliseconds.
 
 #define MAX(x, y) (((x) > (y)) ? (x) : (y))
 #define MIN(x, y) (((x) > (y)) ? (y) : (x))
@@ -93,6 +93,7 @@ void update_window(rel_t *r) {
   //     Set congestion window = ssthresh and set slow start = false.
   // Else:
   //   Set congestion window + 1.
+
   if (r->slow_start == 1) { // Slow start.
     if (r->c_window * 2 < r->ssthresh) {
       r->c_window *= 2;
@@ -103,6 +104,9 @@ void update_window(rel_t *r) {
   } else { // AIMD.
     r->c_window += 1;
   }
+  //printf("Updated to %d, slow_start: %d, ssthresh: %d.\n", r->c_window, r->slow_start, r->ssthresh);
+  // Clip the congestion window to the max window argument.
+  r->c_window = MIN(r->c_window, r->window);
 }
 
 // Resizes p_buf given that n is larger than the current size of p_buf.
@@ -141,7 +145,7 @@ rel_t * rel_create (conn_t *c, const struct sockaddr_storage *ss,
   r->window = cc->window;
   r->r_window = INF;
   r->c_window = INITIAL_C_WINDOW;
-  r->timeout = cc->timeout;
+  r->timeout = 0;
 
   r->window_seqno = 0;
 
@@ -163,6 +167,11 @@ rel_t * rel_create (conn_t *c, const struct sockaddr_storage *ss,
   r->dup_ack_count = 0;
 
   clock_gettime(CLOCK_MONOTONIC, &(r->start_time)); // Set start time.
+
+  // Read so we send the EOF immediately.
+  if (c->sender_receiver == RECEIVER) {
+    rel_read(r);
+  }
   return r;
 }
 
@@ -182,6 +191,25 @@ void rel_destroy (rel_t *r) {
 void rel_demux (const struct config_common *cc,
                 const struct sockaddr_storage *ss,
                 packet_t *pkt, size_t len) {
+}
+
+void send_window(rel_t *r) {
+  // Send an entire window.
+  int s_window = MIN(r->c_window, r->r_window);
+  int s_window_start = r->r_ackno - r->window_seqno;
+  int s_window_end = r->my_seqno - r->window_seqno + 1;
+
+  int j = 0;
+  for (j = s_window_start;
+       j < MIN(s_window_end, s_window_start + s_window); j++) {
+    struct packet *p_ptr = (struct packet *)
+      (r->p_buf + PACKET_LENGTH * j);
+    int p_len = ntohs(p_ptr->len);
+    if (r->r_window > 0) conn_sendpkt(r->c, p_ptr, p_len);
+    printf("Sent %d.\n", ntohl(p_ptr->seqno));
+    r->r_window -= 1;
+  }
+  r->timeout = 0;
 }
 
 void rel_recvpkt (rel_t *r, packet_t *pkt, size_t n) {
@@ -213,13 +241,13 @@ void rel_recvpkt (rel_t *r, packet_t *pkt, size_t n) {
     // r->r_ackno = pkt_ackno > r->r_ackno ? pkt_ackno : r->r_ackno;
     if (pkt_ackno == r->r_ackno) r->dup_ack_count += 1;
     else r->dup_ack_count = 0;
-
     if (r->dup_ack_count >= 3) {
       // TODO: Triple duplicate ack, cut ssthresh, c_window to ssthresh, start
       // AIMD.
       // TODO: ssthresh gets cut to max c_window / 2 or 2?
-      r->ssthresh = MAX(r->c_window / 2, 2);
-      r->c_window = r->ssthresh;
+      // TODO: Don't touch ssthresh.
+      //r->ssthresh = MAX(r->c_window / 2, 2);
+      r->c_window = MAX(r->c_window / 2, INITIAL_C_WINDOW);
       r->slow_start = 0;
 
       // Fast retransmit the last packet.      
@@ -232,15 +260,23 @@ void rel_recvpkt (rel_t *r, packet_t *pkt, size_t n) {
 
       r->dup_ack_count = 0;
     }
+    printf("Got ack: %d.\n", r->r_ackno);
     r->r_ackno = MAX(pkt_ackno, r->r_ackno);
-    if (r->my_seqno == pkt_ackno + 1)
-      update_window(r); // Update congestion vars.
+    // Only update if the receiving window is > congestion window.
+    //printf("my_seqno: %d, pkt_ackno: %d\n", r->my_seqno, pkt_ackno);
 
+    int s_window = MIN(r->c_window, r->r_window);
+    if (r->my_seqno + 1 == pkt_ackno) { //&& (r->c_window < r->r_window))
+      update_window(r); // Update congestion vars.
+      rel_read(r); // Read if we can.
+    } else if (pkt_ackno >= r->window_seqno + s_window) { // TODO: >= right?
+      send_window(r);
+    }
     assert(r->r_ackno <= r->my_seqno + 1);
-    // TODO: Should we limit reads?
-    rel_read(r); // Read if we can.
+
   } else {
     // Received a (theoretically) valid data packet.
+    printf("Got %d.\n", pkt_seqno);
     struct packet temp; // Bullshit so I can get packet header length.
     int pkt_data_len = pkt_len - (PACKET_LENGTH - sizeof(temp.data));
     // Only send the acknowledge if we have the space for packet data.
@@ -277,19 +313,22 @@ void rel_read (rel_t *s) {
     // implementation will deal with waiting for the ack.
     else {
       s->my_seqno += 1;
+      s->window_seqno += 1;
       struct packet *p = send_packet(s, DATA_PACKET, s->my_ackno,
                                      conn_bufspace(s->c) / PACKET_LENGTH,
                                      s->my_seqno, NULL, 0);
       memcpy(s->p_buf, p, PACKET_LENGTH);
       free(p);
     }
+    s->my_eof = 1;
+    s->timeout = 0;
     return;
   }
 
   // The sending window size is the minimum of our congestion window and the
   // advertised receiving window.
   int s_window = MIN(s->c_window, s->r_window);
-  s_window = MIN(s->window, s_window); // TODO: Clip window size if need to.
+  if (s_window == 0) return;
   resize_p_buf(s, s_window); // Resize the buffer if we need to.
   
   // Sender mode.
@@ -304,18 +343,12 @@ void rel_read (rel_t *s) {
   // We don't read if our window is full. That means there are no packets in
   // our window have been acked.
 
-  // Our window is full if my_seqno + 1 - r_ackno >= window
-  // If our sequence number - remote acknowledge number is the window size.
-  // Don't read if we haven't received any acks yet and the window is full.
-  // TODO: Make sure second argument is right.
-  // We do read if there are acked packets sitting at the front of our buffer.
-  // This check is required now that the buffer is independent of the window
-  // size.
-  if (s->my_seqno + 1 - s->r_ackno >= s_window
-      && s->r_ackno == s->window_seqno)
-    return;
-
-  // TODO: Expand buffer size according to s_window.
+  // If our buffer contains unacked packets, we do not allow read to run. Our
+  // implementation treats buffers as rounds for simplicity. The buffer is only
+  // filled up to a certain s_window, and if the window changes the rest of it
+  // is not populated immediately for simplicity.
+  assert(s->r_ackno <= s->my_seqno + 1);
+  if ((s->r_ackno < s->my_seqno + 1) && s->my_seqno > 0) return;
 
   // If our window isn't full, it means that either the entire window is
   // available to read, or part of it is.
@@ -331,23 +364,8 @@ void rel_read (rel_t *s) {
   // length.
   int i = 0; // Buffer frame index, assume whole window available initially.
 
-  // If r_ackno > window_seqno, then there are acked packets at the beginning
-  // of our buffer.
-  // If our buffer begins with acked packets, we first move those out.
-  if (s->my_seqno > 0) {
-    // Need to deal with window = 1 case apparently...
-    if (s->r_ackno > s->window_seqno) {
-      int offset = s->r_ackno - s->window_seqno;
-      //assert(offset <= s_window);
-      // Copy last window - p_buf_pkt_len packets to the front of the buffer.
-      memcpy(s->p_buf, s->p_buf + PACKET_LENGTH * offset,
-	     PACKET_LENGTH * (s->p_buf_pkt_len - offset));
-    }
-  }
   // The window should at this point start with the last acked packet number.
   s->window_seqno = s->r_ackno;
-  // Skip all slots with unacknowledged packets.
-  i += s->my_seqno + 1 - s->window_seqno;
 
   // Region of buffer that is not acked is given by:
   // r_ackno - w_seqno : my_seqno - window_seqno
@@ -373,8 +391,9 @@ void rel_read (rel_t *s) {
                                    s->my_seqno, p_ptr->data, n);
     memcpy(p_ptr, p, PACKET_LENGTH); // Copy the whole packet to the buffer.
     free(p);
+    printf("Sent %d.\n", s->my_seqno);
   }
-  clock_gettime(CLOCK_MONOTONIC, &(s->window_time)); // Reset window clock.
+  s->timeout = 0;
 }
 
 void rel_output (rel_t *r) {
@@ -385,11 +404,15 @@ void rel_timer () {
   rel_t *r_ptr = rel_list;
   // Check destruction conditions for each connection.
   // TODO: Talk to others about output draining condition.
+  //printf("my_eof: %d, r_eof: %d, r_ackno: %d, my_seqno: %d\n", r_ptr->my_eof, r_ptr->r_eof, r_ptr->r_ackno, r_ptr->my_seqno);
+  printf("r_window: %d, c_window: %d\n", r_ptr->r_window, r_ptr->c_window);
   if (r_ptr->my_eof && r_ptr->r_eof
       && (r_ptr->r_ackno == r_ptr->my_seqno + 1)) {
     rel_destroy(r_ptr);
     return;
   }
+
+  r_ptr->timeout += 1;
 
   // Timeout: Can happen wherever... If our last received ack is not equal to
   // our last sent packet, we timeout.
@@ -397,28 +420,27 @@ void rel_timer () {
   // Retransmit any packets that need to be retransmitted.
   if (r_ptr->my_seqno == 0) return;
 
-  struct timespec t;
-  clock_gettime(CLOCK_MONOTONIC, &t);
-  long now = t.tv_sec;
-  long old = (r_ptr->window_time).tv_sec;
   // If we haven't received acks in time, resend the packets.
   if ((r_ptr->r_ackno < r_ptr->my_seqno + 1)
-      && (now - old > TIMEOUT)) {
-    r_ptr->ssthresh = r_ptr->c_window / 2;
+      && (r_ptr->timeout > TIMEOUT)) {
+    r_ptr->ssthresh = MAX(r_ptr->c_window / 2, INITIAL_C_WINDOW);
     r_ptr->c_window = INITIAL_C_WINDOW;
+    r_ptr->slow_start = 1;
     int j;
     // Send the whole window again.
     int s_window = MIN(r_ptr->c_window, r_ptr->r_window);
     int s_window_start = r_ptr->r_ackno - r_ptr->window_seqno;
     int s_window_end = r_ptr->my_seqno - r_ptr->window_seqno + 1;
+    //printf("s_window_start: %d, MIN(s_window_end, s_window_start + s_window): %d\n", s_window_start, MIN(s_window_end, s_window_start + s_window));
     for (j = s_window_start;
          j < MIN(s_window_end, s_window_start + s_window); j++) {
       struct packet *p_ptr = (struct packet *)
         (r_ptr->p_buf + PACKET_LENGTH * j);
       int p_len = ntohs(p_ptr->len);
       if (r_ptr->r_window > 0) conn_sendpkt(r_ptr->c, p_ptr, p_len);
+      printf("Sent %d (timeout).\n", ntohl(p_ptr->seqno));
       r_ptr->r_window -= 1;
     }
-    clock_gettime(CLOCK_MONOTONIC, &(r_ptr->window_time));
+    r_ptr->timeout = 0;
   }
 }
