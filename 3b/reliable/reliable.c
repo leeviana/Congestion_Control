@@ -44,7 +44,6 @@ struct reliable_state {
   int window_seqno; // Sequence number of the first packet in our window.
 
   char *p_buf;                 // Sending window buffer.
-  int p_buf_pkt_len;           // Length of the buffer in packets.
   struct timespec window_time; // Last send time of the window.
 
   int my_ackno; // Our current acknowledged packet #.
@@ -116,17 +115,6 @@ void update_window(rel_t *r) {
   r->c_window = MIN(r->c_window, r->window * PACKET_LENGTH);
 }
 
-// Resizes p_buf given that n is larger than the current size of p_buf.
-void resize_p_buf(rel_t *r, int n) {
-  if (n <= r->p_buf_pkt_len) return;
-  char *t = malloc(PACKET_LENGTH * n);
-  memcpy(t, r->p_buf, PACKET_LENGTH * r->p_buf_pkt_len);
-  free(r->p_buf);
-
-  r->p_buf_pkt_len = n;
-  r->p_buf = t;
-}
-
 // Creates a new reliable protocol session, returns NULL on failure.  Exactly
 // one of c and ss should be NULL.  (ss is NULL when called from rlib.c, while
 // c is NULL when this function is called from rel_demux).
@@ -157,8 +145,7 @@ rel_t * rel_create (conn_t *c, const struct sockaddr_storage *ss,
   r->window_seqno = 0;
 
   // Allocate the sending window size.
-  r->p_buf = malloc(PACKET_LENGTH * 1); // TODO: Min of fc_window & c_window.
-  r->p_buf_pkt_len = 1;
+  r->p_buf = malloc(PACKET_LENGTH * r->window); // TODO: Min of fc_window & c_window.
 
   r->my_ackno = 1;
   r->my_seqno = 0;
@@ -339,11 +326,10 @@ void rel_read (rel_t *s) {
   // The sending window size is the minimum of our congestion window and the
   // advertised receiving window.
   int size = s_window(s);
-  resize_p_buf(s, size); // Resize the buffer if we need to.
   
   // Sender mode.
   // Basic assertions.
-  assert(s_window > 0);
+  assert(size > 0);
 
   // Read in a single sliding window.
   // If the sliding window hasn't been sent, don't overwrite it.
@@ -372,10 +358,26 @@ void rel_read (rel_t *s) {
   // TODO: This used to be handled based on the window size, but since now
   // window size does not guarantee buffer size, we packet shift by the buffer
   // length.
+
   int i = 0; // Buffer frame index, assume whole window available initially.
 
+  // If r_ackno > window_seqno, then there are acked packets at the beginning
+  // of our buffer.
+  // If our buffer begins with acked packets, we first move those out.
+  if (s->my_seqno > 0) {
+    // Need to deal with window = 1 case apparently...
+    if (s->r_ackno > s->window_seqno) {
+      int offset = s->r_ackno - s->window_seqno;
+      //assert(offset <= s_window);
+      // Copy last window - p_buf_pkt_len packets to the front of the buffer.
+      memcpy(s->p_buf, s->p_buf + PACKET_LENGTH * offset,
+	     PACKET_LENGTH * (s->window - offset));
+    }
+  }
   // The window should at this point start with the last acked packet number.
   s->window_seqno = s->r_ackno;
+  // Skip all slots with unacknowledged packets.
+  i += s->my_seqno + 1 - s->window_seqno;
 
   // Region of buffer that is not acked is given by:
   // r_ackno - w_seqno : my_seqno - window_seqno
