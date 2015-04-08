@@ -139,8 +139,7 @@ conn_bufspace (conn_t *c)
 {
   chunk_t *ch;
   size_t used = 0;
-  // const size_t bufsize = 8192;
-  const size_t bufsize = 8192*32;
+  const size_t bufsize = 64 * 8192;
 
 
   for (ch = c->outq; ch; ch = ch->next)
