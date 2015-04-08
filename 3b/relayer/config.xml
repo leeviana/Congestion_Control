@@ -16,7 +16,7 @@
 <bandwidth>10000</bandwidth>
 
 <!-- buffer size in number of packets, delay bandwidth product is recommended, RTT * bandwidth -->
-<buffer_size>400</buffer_size>
+<buffer_size>25</buffer_size>
 
 <pairs>
   <pair>

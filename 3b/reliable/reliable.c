@@ -261,7 +261,10 @@ void rel_recvpkt (rel_t *r, packet_t *pkt, size_t n) {
 	struct packet *p_ptr = (struct packet *)
 	  (r->p_buf + PACKET_LENGTH * s_window_start);
         update_packet(r, p_ptr);
-	send_packet(r, DATA_PACKET, p_ptr);
+
+        r->my_seqno = ntohl(p_ptr->seqno);
+        send_window(r);
+	//send_packet(r, DATA_PACKET, p_ptr);
         printf("Sent %d (trip dup).\n", ntohl(p_ptr->seqno));
 
 	r->dup_ack_count = 0;
@@ -427,6 +430,7 @@ void rel_read (rel_t *s) {
 
 void rel_output (rel_t *r) {
   // TODO: Ack last received packet.
+  printf("WTF!!!\n"); fflush(stdout);
 }
 
 void rel_timer () {
@@ -434,7 +438,7 @@ void rel_timer () {
   // Check destruction conditions for each connection.
   // TODO: Talk to others about output draining condition.
   //printf("my_eof: %d, r_eof: %d, r_ackno: %d, my_seqno: %d\n", r_ptr->my_eof, r_ptr->r_eof, r_ptr->r_ackno, r_ptr->my_seqno);
-  //printf("r_window: %d, c_window: %d\n", r_ptr->r_window, r_ptr->c_window);
+  printf("r_window: %d, c_window: %d\n", r_ptr->r_window, r_ptr->c_window);
   if (r_ptr->my_eof && r_ptr->r_eof
       && (r_ptr->r_ackno == r_ptr->p_buf_seqno + 1)) {
     rel_destroy(r_ptr);
