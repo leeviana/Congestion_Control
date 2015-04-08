@@ -63,8 +63,8 @@ struct reliable_state {
 rel_t *rel_list;
 
 
-struct packet *send_packet(rel_t *r, int type, uint32_t ackno, uint32_t rwnd,
-                           uint32_t seqno, char *data, int n) {
+struct packet *build_packet(rel_t *r, int type, uint32_t ackno, uint32_t rwnd,
+                            uint32_t seqno, char *data, int n) {
   assert(type == ACK_PACKET || type == DATA_PACKET);
   struct packet *p = malloc(PACKET_LENGTH);
   struct packet temp;
@@ -79,10 +79,16 @@ struct packet *send_packet(rel_t *r, int type, uint32_t ackno, uint32_t rwnd,
   if (data != NULL) memcpy(p->data, data, n);
   p->cksum = 0;
   p->cksum = cksum(p, len);
-  if (r->r_window > 0) conn_sendpkt(r->c, p, len);
-  r->r_window -= 1;
 
   return p;
+}
+
+void send_packet(rel_t *r, int type, struct packet *p) {
+  int len = ntohs(p->len);
+  if (type == DATA_PACKET) {
+    if (r->r_window > 0) r->r_window -= 1;
+  }
+  conn_sendpkt(r->c, p, len);
 }
 
 void update_window(rel_t *r) {
@@ -95,18 +101,19 @@ void update_window(rel_t *r) {
   //   Set congestion window + 1.
 
   if (r->slow_start == 1) { // Slow start.
-    if (r->c_window * 2 < r->ssthresh) {
-      r->c_window *= 2;
+    if (r->c_window + PACKET_LENGTH < r->ssthresh) {
+      r->c_window += PACKET_LENGTH;
     } else {
       r->c_window = r->ssthresh;
       r->slow_start = 0;
     }
   } else { // AIMD.
-    r->c_window += 1;
+    r->c_window += (PACKET_LENGTH * PACKET_LENGTH) / r->c_window;
   }
   //printf("Updated to %d, slow_start: %d, ssthresh: %d.\n", r->c_window, r->slow_start, r->ssthresh);
   // Clip the congestion window to the max window argument.
-  r->c_window = MIN(r->c_window, r->window);
+  r->c_window = MIN(r->c_window, r->r_window * PACKET_LENGTH);
+  r->c_window = MIN(r->c_window, r->window * PACKET_LENGTH);
 }
 
 // Resizes p_buf given that n is larger than the current size of p_buf.
@@ -144,7 +151,7 @@ rel_t * rel_create (conn_t *c, const struct sockaddr_storage *ss,
   // Init. TODO: Check.
   r->window = cc->window;
   r->r_window = INF;
-  r->c_window = INITIAL_C_WINDOW;
+  r->c_window = PACKET_LENGTH;
   r->timeout = 0;
 
   r->window_seqno = 0;
@@ -162,7 +169,7 @@ rel_t * rel_create (conn_t *c, const struct sockaddr_storage *ss,
   r->r_eof = 0;
 
   r->slow_start = 1; // Start in slow start.
-  r->ssthresh = 32;  // Arbitrarily chose 32 b/c it divides evenly by 2.
+  r->ssthresh = 32 * PACKET_LENGTH;  // Arbitrarily chose 32 b/c it divides evenly by 2.
 
   r->dup_ack_count = 0;
 
@@ -193,21 +200,25 @@ void rel_demux (const struct config_common *cc,
                 packet_t *pkt, size_t len) {
 }
 
+int s_window(rel_t *r) {
+  int size = MIN(r->c_window / PACKET_LENGTH, r->r_window);
+  size = MAX(size, 1);
+  return size;
+}
+
 void send_window(rel_t *r) {
   // Send an entire window.
-  int s_window = MIN(r->c_window, r->r_window);
+  int size = s_window(r);
   int s_window_start = r->r_ackno - r->window_seqno;
   int s_window_end = r->my_seqno - r->window_seqno + 1;
 
   int j = 0;
   for (j = s_window_start;
-       j < MIN(s_window_end, s_window_start + s_window); j++) {
+       j < MIN(s_window_end, s_window_start + size); j++) {
     struct packet *p_ptr = (struct packet *)
       (r->p_buf + PACKET_LENGTH * j);
-    int p_len = ntohs(p_ptr->len);
-    if (r->r_window > 0) conn_sendpkt(r->c, p_ptr, p_len);
+    send_packet(r, DATA_PACKET, p_ptr);
     printf("Sent %d.\n", ntohl(p_ptr->seqno));
-    r->r_window -= 1;
   }
   r->timeout = 0;
 }
@@ -247,16 +258,14 @@ void rel_recvpkt (rel_t *r, packet_t *pkt, size_t n) {
       // TODO: ssthresh gets cut to max c_window / 2 or 2?
       // TODO: Don't touch ssthresh.
       //r->ssthresh = MAX(r->c_window / 2, 2);
-      r->c_window = MAX(r->c_window / 2, INITIAL_C_WINDOW);
+      r->c_window = MAX(r->c_window / 2, PACKET_LENGTH);
       r->slow_start = 0;
 
       // Fast retransmit the last packet.      
       int s_window_start = r->r_ackno - r->window_seqno;
       struct packet *p_ptr = (struct packet *)
         (r->p_buf + PACKET_LENGTH * s_window_start);
-      int p_len = ntohs(p_ptr->len);
-      if (r->r_window > 0) conn_sendpkt(r->c, p_ptr, p_len);
-      r->r_window -= 1;
+      send_packet(r, ACK_PACKET, p_ptr);
 
       r->dup_ack_count = 0;
     }
@@ -265,11 +274,11 @@ void rel_recvpkt (rel_t *r, packet_t *pkt, size_t n) {
     // Only update if the receiving window is > congestion window.
     //printf("my_seqno: %d, pkt_ackno: %d\n", r->my_seqno, pkt_ackno);
 
-    int s_window = MIN(r->c_window, r->r_window);
+    int size = s_window(r);
     if (r->my_seqno + 1 == pkt_ackno) { //&& (r->c_window < r->r_window))
       update_window(r); // Update congestion vars.
       rel_read(r); // Read if we can.
-    } else if (pkt_ackno >= r->window_seqno + s_window) { // TODO: >= right?
+    } else if (pkt_ackno >= r->window_seqno + size) { // TODO: >= right?
       send_window(r);
     }
     assert(r->r_ackno <= r->my_seqno + 1);
@@ -297,9 +306,10 @@ void rel_recvpkt (rel_t *r, packet_t *pkt, size_t n) {
       conn_output(r->c, pkt->data, pkt_data_len);
     }
     // Acknowledge the last packet we accepted.
-    struct packet *p = send_packet(r, ACK_PACKET, r->my_ackno,
-                                   conn_bufspace(r->c) / PACKET_LENGTH,
-                                   0, NULL, 0);
+    struct packet *p = build_packet(r, ACK_PACKET, r->my_ackno,
+                                    conn_bufspace(r->c) / PACKET_LENGTH,
+                                    0, NULL, 0);
+    send_packet(r, ACK_PACKET, p);
     free(p);
   }
 }
@@ -314,9 +324,10 @@ void rel_read (rel_t *s) {
     else {
       s->my_seqno += 1;
       s->window_seqno += 1;
-      struct packet *p = send_packet(s, DATA_PACKET, s->my_ackno,
-                                     conn_bufspace(s->c) / PACKET_LENGTH,
-                                     s->my_seqno, NULL, 0);
+      struct packet *p = build_packet(s, DATA_PACKET, s->my_ackno,
+                                      conn_bufspace(s->c) / PACKET_LENGTH,
+                                      s->my_seqno, NULL, 0);
+      send_packet(s, DATA_PACKET, p);
       memcpy(s->p_buf, p, PACKET_LENGTH);
       free(p);
     }
@@ -327,9 +338,8 @@ void rel_read (rel_t *s) {
 
   // The sending window size is the minimum of our congestion window and the
   // advertised receiving window.
-  int s_window = MIN(s->c_window, s->r_window);
-  if (s_window == 0) return;
-  resize_p_buf(s, s_window); // Resize the buffer if we need to.
+  int size = s_window(s);
+  resize_p_buf(s, size); // Resize the buffer if we need to.
   
   // Sender mode.
   // Basic assertions.
@@ -372,7 +382,7 @@ void rel_read (rel_t *s) {
 
   // Read as many packets as we can into the buffer.
   struct packet p;
-  for (; i < s_window; i++) {
+  for (; i < size; i++) {
     // Once we read an EOF it'll be put in the buffer and sent. Afterwards we
     // return no matter what since we're done.
     if (s->my_eof == 1) break;
@@ -386,9 +396,10 @@ void rel_read (rel_t *s) {
     }
 
     s->my_seqno += 1; // Increment our seqno right before a packet is read.
-    struct packet *p = send_packet(s, DATA_PACKET, s->my_ackno,
-                                   conn_bufspace(s->c) / PACKET_LENGTH,
-                                   s->my_seqno, p_ptr->data, n);
+    struct packet *p = build_packet(s, DATA_PACKET, s->my_ackno,
+                                    conn_bufspace(s->c) / PACKET_LENGTH,
+                                    s->my_seqno, p_ptr->data, n);
+    send_packet(s, DATA_PACKET, p);
     memcpy(p_ptr, p, PACKET_LENGTH); // Copy the whole packet to the buffer.
     free(p);
     printf("Sent %d.\n", s->my_seqno);
@@ -423,24 +434,19 @@ void rel_timer () {
   // If we haven't received acks in time, resend the packets.
   if ((r_ptr->r_ackno < r_ptr->my_seqno + 1)
       && (r_ptr->timeout > TIMEOUT)) {
-    r_ptr->ssthresh = MAX(r_ptr->c_window / 2, INITIAL_C_WINDOW);
-    r_ptr->c_window = INITIAL_C_WINDOW;
+    r_ptr->ssthresh = MAX(r_ptr->c_window / 2, PACKET_LENGTH);
+    r_ptr->c_window = PACKET_LENGTH;
     r_ptr->slow_start = 1;
-    int j;
+    //int j;
     // Send the whole window again.
-    int s_window = MIN(r_ptr->c_window, r_ptr->r_window);
+    //int s_window = MIN(r_ptr->c_window, r_ptr->r_window);
     int s_window_start = r_ptr->r_ackno - r_ptr->window_seqno;
-    int s_window_end = r_ptr->my_seqno - r_ptr->window_seqno + 1;
-    //printf("s_window_start: %d, MIN(s_window_end, s_window_start + s_window): %d\n", s_window_start, MIN(s_window_end, s_window_start + s_window));
-    for (j = s_window_start;
-         j < MIN(s_window_end, s_window_start + s_window); j++) {
-      struct packet *p_ptr = (struct packet *)
-        (r_ptr->p_buf + PACKET_LENGTH * j);
-      int p_len = ntohs(p_ptr->len);
-      if (r_ptr->r_window > 0) conn_sendpkt(r_ptr->c, p_ptr, p_len);
-      printf("Sent %d (timeout).\n", ntohl(p_ptr->seqno));
-      r_ptr->r_window -= 1;
-    }
+    //int s_window_end = r_ptr->my_seqno - r_ptr->window_seqno + 1;
+    struct packet *p_ptr = (struct packet *)
+      (r_ptr->p_buf + PACKET_LENGTH * s_window_start);
+    send_packet(r_ptr, DATA_PACKET, p_ptr);
+    printf("Sent %d (timeout).\n", ntohl(p_ptr->seqno));
     r_ptr->timeout = 0;
+    r_ptr->r_window = INF;
   }
 }
