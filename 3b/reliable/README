@@ -1,0 +1,13 @@
+CS356 - Congestion Control Assignment
+=====================================
+
+Group Members: 
+Sai Cheemalapati
+Leeviana Gray
+John Lorenz
+Zachary Bears
+
+Implementation Particulars - 3b:
+In 3b we implement a sliding window procedure with checks after every window size has sent. Window size is defined by the lower of the flow (r_window) and congestion (c_window) constraints on the window size.
+
+We start in slow start until we hit ssthresh which is initially set at a point (SAIFILLTHISIN) higher than where we should time out. On timeout, ssthresh is set to half the value of our current congestion window and we start over. When we finally reach ssthresh, we implement the general AIMD principle by increasing our congestion window by one when an entire window is acked and decreasing by 1/5 the window size when we receive at least three duplicate acks.

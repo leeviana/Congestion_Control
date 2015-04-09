@@ -1,0 +1,15 @@
+CS356 - Congestion Control Assignment
+=====================================
+
+Group Members: 
+Sai Cheemalapati
+Leeviana Gray
+John Lorenz
+Zachary Bears
+
+Implementation Particulars - 3a:
+Sliding Window - We implemented sliding window by storing the last received ackno, seqno and whether or not we've received an EOF from the receiver. Our window is defined by the window length and the sequence number of the first packet in our window. 
+
+Buffer - We store packets in a buffer the size of the sending window until they are acked. When they are acked we remove them from our window buffer and continue reading to ensure that our buffer doesn't contain any acked packets.
+
+Timeout - on our 10 second timeout, we check the destruction conditions for our connections, retransmit any packets that need to be retransmitted and if our packets haven't been acked in time, we resend the packets
